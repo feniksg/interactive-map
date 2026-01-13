@@ -8,6 +8,12 @@
             <button :class="{ active: activeFloor === 2 }" @click="setFloor(2)">
                 Этаж 2
             </button>
+            <button @click="toggleRoute">
+                {{ routeVisible ? 'Удалить маршрут' : 'Построить маршрут' }}
+            </button>
+            <button @click="toggleAnim" :disabled="!routeVisible">
+                {{ animVisible ? 'Выключить анимацию' : 'Включить анимацию' }}
+            </button>
         </div>
 
         <div ref="container" class="three-container"></div>
@@ -23,6 +29,17 @@ import { onMounted, ref } from 'vue'
 const container = ref<HTMLDivElement | null>(null)
 
 const activeFloor = ref<1 | 2>(1)
+
+const routeVisible = ref(false)
+
+const animVisible = ref(false)
+
+let routeCurve: THREE.Curve<THREE.Vector3> | null = null
+let routeMarker: THREE.Mesh | null = null
+let routeT = 0
+
+let routeMesh: THREE.Mesh | null = null
+let waypointObjects: THREE.Object3D[] = []
 
 let renderer: THREE.WebGLRenderer | null = null
 let controls: OrbitControls | null = null
@@ -50,17 +67,9 @@ function applyFloorVisibility() {
 function setFloor(floor: 1 | 2) {
     activeFloor.value = floor
     applyFloorVisibility()
-}
 
-function getRaycastRoot(): THREE.Object3D {
-    // если этажи определены — кликаем ТОЛЬКО по активному
-    if (floor1 && floor2) {
-        return activeFloor.value === 1 ? floor1 : floor2
-    }
-    // fallback, если этажи не найдены
-    return modelRoot!
+    if (_sceneRef && routeVisible.value) removeRoute(_sceneRef)
 }
-
 
 function highlightRoom(mesh: THREE.Mesh) {
     // снять выделение с прошлого объекта
@@ -88,6 +97,160 @@ function isActuallyVisible(obj: THREE.Object3D) {
     return true
 }
 
+////////////
+//Маршрут
+////////////
+function getWaypoints(model: THREE.Object3D) {
+    const list: { idx: number; obj: THREE.Object3D }[] = []
+
+    model.traverse((o) => {
+        if (!o.name) return
+
+        // waypoint1, waypoint2, waypoint3 ...
+        const m = o.name.match(/^waypoint(\d+)$/i)
+        if (!m) return
+
+        list.push({ idx: Number(m[1]), obj: o })
+    })
+
+    list.sort((a, b) => a.idx - b.idx)
+    return list.map((x) => x.obj)
+}
+
+function buildRoute(scene: THREE.Scene) {
+    if (!modelRoot) return
+
+    if (routeMesh) removeRoute(scene)
+
+    // получаем waypoint'ы
+    const root = (floor1 && floor2)
+        ? (activeFloor.value === 1 ? floor1 : floor2)
+        : modelRoot
+
+    if (!root) return
+
+    waypointObjects = getWaypoints(modelRoot)
+
+    if (waypointObjects.length < 2) {
+        console.warn('Недостаточно waypoint точек для маршрута')
+        console.log(waypointObjects.length)
+        return
+    }
+
+    const points = waypointObjects.map((o) => {
+        const p = new THREE.Vector3()
+        o.getWorldPosition(p)
+        return p
+    })
+
+    // строим curve + tube
+    const curve = new THREE.CurvePath<THREE.Vector3>()
+
+    for (let i = 0; i < points.length - 1; i++) {
+        curve.add(new THREE.LineCurve3(points[i], points[i + 1]))
+    }
+    routeCurve = curve
+
+    const geometry = new THREE.TubeGeometry(curve, 200, 0.05, 16, false)
+
+    const material = new THREE.MeshStandardMaterial({
+        color: 0xe60b30,
+        emissive: 0xe60b30,
+        emissiveIntensity: 0.9,
+        roughness: 0.25,
+        metalness: 0.0,
+    })
+
+    routeMesh = new THREE.Mesh(geometry, material)
+    routeMesh.name = 'NAV_ROUTE'
+    scene.add(routeMesh)
+
+    routeVisible.value = true
+}
+
+function removeRoute(scene: THREE.Scene) {
+    if (animVisible.value) stopAnim(scene)
+    routeCurve = null
+
+    if (!routeMesh) {
+        routeVisible.value = false
+        return
+    }
+
+    scene.remove(routeMesh)
+
+    // освободить память GPU
+    routeMesh.geometry.dispose()
+    if (Array.isArray(routeMesh.material)) {
+        routeMesh.material.forEach((m) => m.dispose())
+    } else {
+        routeMesh.material.dispose()
+    }
+
+    routeMesh = null
+    routeVisible.value = false
+}
+
+let _sceneRef: THREE.Scene | null = null
+
+function toggleRoute() {
+    if (!_sceneRef) return
+    if (routeVisible.value) removeRoute(_sceneRef)
+    else buildRoute(_sceneRef)
+}
+
+//////
+// Анимация маршрута
+//////
+
+function startAnim(scene: THREE.Scene) {
+    if (!routeCurve) {
+        console.warn('routeCurve не создан — сначала построй маршрут')
+        return
+    }
+
+    // если маркер уже есть — не создаём второй
+    if (!routeMarker) {
+        const g = new THREE.SphereGeometry(0.25, 24, 24)
+        const m = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0x550000,
+            emissiveIntensity: 0.9,
+            roughness: 0.2,
+            metalness: 0.0,
+        })
+        routeMarker = new THREE.Mesh(g, m)
+        routeMarker.castShadow = true
+        scene.add(routeMarker)
+    }
+
+    routeT = 0
+    animVisible.value = true
+}
+
+function stopAnim(scene: THREE.Scene) {
+    animVisible.value = false
+
+    if (routeMarker) {
+        scene.remove(routeMarker)
+        routeMarker.geometry.dispose()
+        if (Array.isArray(routeMarker.material)) {
+            routeMarker.material.forEach((mm) => mm.dispose())
+        } else {
+            routeMarker.material.dispose()
+        }
+        routeMarker = null
+    }
+}
+
+function toggleAnim() {
+    if (!_sceneRef) return
+    if (animVisible.value) stopAnim(_sceneRef)
+    else startAnim(_sceneRef)
+}
+
+
+
 onMounted(() => {
     if (!container.value) return
 
@@ -95,6 +258,7 @@ onMounted(() => {
     const height = container.value.clientHeight
 
     const scene = new THREE.Scene()
+    _sceneRef = scene
     scene.background = new THREE.Color(0xf2f2f2)
 
     const camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 2000)
@@ -182,10 +346,16 @@ onMounted(() => {
 
     // Загрузка GLB
     const loader = new GLTFLoader()
-    loader.load('/models/buildingv3.glb', (gltf) => {
+    loader.load('/models/buildingv4.glb', (gltf) => {
         const model = gltf.scene
         scene.add(model)
         modelRoot = model
+
+        console.log('===== GLB OBJECTS LIST START =====')
+        model.traverse((o) => {
+            console.log(o.type, o.name || '(no name)')
+        })
+        console.log('===== GLB OBJECTS LIST END =====')
 
         model.traverse((obj) => {
             if ((obj as THREE.Mesh).isMesh) {
@@ -227,6 +397,16 @@ onMounted(() => {
 
     const animate = () => {
         requestAnimationFrame(animate)
+
+        const speed = 0.25
+        if (animVisible.value && routeCurve && routeMarker) {
+            routeT += speed * 0.016
+            routeT = routeT % 1
+
+            const p = routeCurve.getPointAt(routeT)
+            routeMarker.position.copy(p)
+        }
+
         controls?.update()
         renderer?.render(scene, camera)
     }
