@@ -36,20 +36,6 @@ Navigation paths are built using waypoint objects stored inside the 3D model. Th
 
 The application also supports switching between individual floors of the building.
 
-## Project Structure
-
-.
-├── nginx/
-└── src/
-    └── frontend/
-        ├── app/
-        │   ├── components/
-        │   │   └── three/
-        │   └── pages/
-        ├── public/
-        ├── nuxt.config.ts
-        └── package.json
-
 ## Installation
 
 cd src/frontend
